@@ -24,4 +24,5 @@ import (
 	_ "github.com/containerd/containerd/snapshots/blockfile/plugin"
 	_ "github.com/containerd/containerd/snapshots/native/plugin"
 	_ "github.com/containerd/containerd/snapshots/overlay/plugin"
+	_ "github.com/containerd/containerd/snapshots/overlaylvm/plugin"
 )
