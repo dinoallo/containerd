@@ -292,6 +292,7 @@ func (o *snapshotter) Usage(ctx context.Context, key string) (snapshots.Usage, e
 // To collect the resources associated with key, Remove must be called with
 // key as the argument.
 func (o *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).Infof("received View request for key: %s, parent: %s", key, parent)
 	return o.createSnapshot(ctx, snapshots.KindView, key, parent, opts...)
 }
 
@@ -433,6 +434,7 @@ func (o *snapshotter) Cleanup(ctx context.Context) error {
 //
 // Multiple calls to Prepare or View with the same key should fail.
 func (o *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).Infof("received Prepare request for key: %s, parent: %s", key, parent)
 	return o.createSnapshot(ctx, snapshots.KindActive, key, parent, opts...)
 }
 
