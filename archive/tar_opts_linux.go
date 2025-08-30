@@ -48,7 +48,7 @@ func OverlayConvertWhiteout(hdr *tar.Header, path string) (bool, error) {
 
 		// Remove originalPath if it exists
 		if _, err := os.Stat(originalPath); err == nil {
-			if err := os.Remove(originalPath); err != nil {
+			if err := os.RemoveAll(originalPath); err != nil {
 				return false, err
 			}
 		} else if !os.IsNotExist(err) {
