@@ -21,6 +21,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
@@ -46,18 +47,28 @@ func OverlayConvertWhiteout(hdr *tar.Header, path string) (bool, error) {
 		originalBase := base[len(whiteoutPrefix):]
 		originalPath := filepath.Join(dir, originalBase)
 
-		// Remove originalPath if it exists
-		if _, err := os.Stat(originalPath); err == nil {
+		// If path exists and is already a whiteout char device, keep it.
+		if fi, err := os.Lstat(originalPath); err == nil {
+			if fi.Mode()&os.ModeCharDevice != 0 {
+				// ensure ownership matches header
+				if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+					if int(stat.Uid) != hdr.Uid || int(stat.Gid) != hdr.Gid {
+						_ = os.Chown(originalPath, hdr.Uid, hdr.Gid)
+					}
+				}
+				return false, nil
+			}
+			// Not a char device -> remove to replace with whiteout
 			if err := os.RemoveAll(originalPath); err != nil {
 				return false, err
 			}
 		} else if !os.IsNotExist(err) {
 			return false, err
 		}
+
 		if err := unix.Mknod(originalPath, unix.S_IFCHR, 0); err != nil {
 			return false, err
 		}
-		// don't write the file itself
 		return false, os.Chown(originalPath, hdr.Uid, hdr.Gid)
 	}
 
