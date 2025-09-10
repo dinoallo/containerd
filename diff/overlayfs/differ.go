@@ -239,7 +239,7 @@ func writeDiff(ctx context.Context, w io.Writer, lower []mount.Mount, diffLayers
 		changeWriters := make([]*archive.ChangeWriter, 0, len(diffLayers))
 		for _, l := range diffLayers {
 			root := filepath.Join(l, "fs")
-			cw := archive.NewChangeWriter(io.Discard, root, opts...)
+			cw := archive.NewChangeWriter(w, root, opts...)
 			changeFns = append(changeFns, cw.HandleChange)
 			changeWriters = append(changeWriters, cw)
 		}
