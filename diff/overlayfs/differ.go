@@ -263,16 +263,15 @@ func overlayMountsToLayers(mounts []mount.Mount) ([]string, error) {
 		return nil, fmt.Errorf("expected overlay mount type, got %s", mounts[0].Type)
 	}
 	var (
-		mnt        = mounts[0]
-		layers     = []string{}
-		upperLayer = ""
+		mnt    = mounts[0]
+		layers = []string{}
 	)
 
 	for _, o := range mnt.Options {
 		if k, v, ok := strings.Cut(o, "="); ok {
 			switch k {
 			case "upperdir":
-				upperLayer = filepath.Dir(v)
+				layers = append(layers, filepath.Dir(v))
 			case "lowerdir":
 				// lowerdir can be a colon-separated list
 				for _, dir := range strings.Split(v, ":") {
@@ -280,9 +279,6 @@ func overlayMountsToLayers(mounts []mount.Mount) ([]string, error) {
 				}
 			}
 		}
-	}
-	if upperLayer != "" {
-		layers = append(layers, upperLayer)
 	}
 	if len(layers) == 0 {
 		return nil, fmt.Errorf("no layers found in overlay mount options")
