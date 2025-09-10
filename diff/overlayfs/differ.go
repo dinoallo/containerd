@@ -23,10 +23,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/containerd/containerd/diff/walking"
 	"github.com/containerd/log"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -35,6 +38,7 @@ import (
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/diff"
+	fsstructs "github.com/containerd/containerd/diff/overlayfs/pkg/fs"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/labels"
 	"github.com/containerd/containerd/mount"
@@ -43,7 +47,8 @@ import (
 )
 
 type overlayfsDiff struct {
-	store content.Store
+	store     content.Store
+	naiveDiff diff.Comparer
 }
 
 var emptyDesc = ocispec.Descriptor{}
@@ -56,16 +61,21 @@ var emptyDesc = ocispec.Descriptor{}
 // expected to work with any filesystem.
 func NewOverlayfsDiff(store content.Store) diff.Comparer {
 	return &overlayfsDiff{
-		store: store,
+		store:     store,
+		naiveDiff: walking.NewWalkingDiff(store),
 	}
 }
 
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
 func (s *overlayfsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispec.Descriptor, err error) {
-	layer, err := overlayMountsToLayer(upper)
+	diffLayers, err := tryGeneratingDiffLayers(lower, upper)
 	if err != nil {
-		return emptyDesc, fmt.Errorf("failed to get overlay layer: %w", err)
+		return emptyDesc, fmt.Errorf("failed to generate diff layers: %w", err)
+	}
+	// upper is not based on lower, or upper is the same as lower. In this case, we will do a naive diff
+	if len(diffLayers) == 0 {
+		return s.naiveDiff.Compare(ctx, lower, upper, opts...)
 	}
 	var config diff.Config
 	for _, opt := range opts {
@@ -142,8 +152,6 @@ func (s *overlayfsDiff) Compare(ctx context.Context, lower, upper []mount.Mount,
 		}
 	}
 
-	upperRoot := filepath.Join(layer, "fs")
-
 	if compressionType != compression.Uncompressed {
 		dgstr := digest.SHA256.Digester()
 		var compressed io.WriteCloser
@@ -158,7 +166,7 @@ func (s *overlayfsDiff) Compare(ctx context.Context, lower, upper []mount.Mount,
 				return emptyDesc, fmt.Errorf("failed to get compressed stream: %w", errOpen)
 			}
 		}
-		errOpen = writeDiff(ctx, io.MultiWriter(compressed, dgstr.Hash()), lower, upperRoot, config.SourceDateEpoch)
+		errOpen = writeDiff(ctx, io.MultiWriter(compressed, dgstr.Hash()), lower, diffLayers, config.SourceDateEpoch)
 		compressed.Close()
 		if errOpen != nil {
 			return emptyDesc, fmt.Errorf("failed to write compressed diff: %w", errOpen)
@@ -169,7 +177,7 @@ func (s *overlayfsDiff) Compare(ctx context.Context, lower, upper []mount.Mount,
 		}
 		config.Labels[labels.LabelUncompressed] = dgstr.Digest().String()
 	} else {
-		err := writeDiff(ctx, cw, lower, upperRoot, config.SourceDateEpoch)
+		err := writeDiff(ctx, cw, lower, diffLayers, config.SourceDateEpoch)
 		if err != nil {
 			return emptyDesc, fmt.Errorf("failed to write diff: %w", err)
 		}
@@ -220,54 +228,253 @@ func uniqueRef() string {
 	return fmt.Sprintf("%d-%s", t.UnixNano(), base64.URLEncoding.EncodeToString(b[:]))
 }
 
-func writeDiff(ctx context.Context, w io.Writer, lower []mount.Mount, upperRoot string, sourceDateEpoch *time.Time) error {
+func writeDiff(ctx context.Context, w io.Writer, lower []mount.Mount, diffLayers []string, sourceDateEpoch *time.Time) error {
 	var opts []archive.ChangeWriterOpt
 	if sourceDateEpoch != nil {
 		opts = append(opts, archive.WithModTimeUpperBound(*sourceDateEpoch))
 	}
 
 	return mount.WithTempMount(ctx, lower, func(lowerRoot string) error {
-		cw := archive.NewChangeWriter(w, upperRoot, opts...)
-		if err := fs.DiffDirChanges(ctx, lowerRoot, upperRoot, fs.DiffSourceOverlayFS, cw.HandleChange); err != nil {
+		changeFns := make([]fs.ChangeFunc, 0, len(diffLayers))
+		changeWriters := make([]*archive.ChangeWriter, 0, len(diffLayers))
+		for _, l := range diffLayers {
+			root := filepath.Join(l, "fs")
+			cw := archive.NewChangeWriter(io.Discard, root, opts...)
+			changeFns = append(changeFns, cw.HandleChange)
+			changeWriters = append(changeWriters, cw)
+		}
+		if err := DiffDirChanges(ctx, lowerRoot, diffLayers, changeFns); err != nil {
 			return fmt.Errorf("failed to calculate diff changes: %w", err)
 		}
-		return cw.Close()
+		for _, cw := range changeWriters {
+			if err := cw.Close(); err != nil {
+				return fmt.Errorf("failed to close change writer: %w", err)
+			}
+		}
+		return nil
 	})
 }
 
-// This function extracts the overlay layer from the mount options.
-// It expects the first mount to be of type "overlay" and extracts the upper
-// directory from the options. If the lower directory is specified, it uses
-// the top-level lower directory as the layer. If no lower directory is specified,
-// it returns an error indicating that the overlay layer is unsupported for
-// This code snippet is credited to the erofs differ:
-// https://github.com/erofs/containerd/blob/main/internal/erofsutils/mount_linux.go#L66
-func overlayMountsToLayer(mounts []mount.Mount) (string, error) {
+func overlayMountsToLayers(mounts []mount.Mount) ([]string, error) {
 	if len(mounts) == 0 {
-		return "", errors.New("no mounts provided")
+		return nil, errors.New("no mounts provided")
 	}
 	if mounts[0].Type != "overlay" {
-		return "", fmt.Errorf("expected overlay mount type, got %s", mounts[0].Type)
+		return nil, fmt.Errorf("expected overlay mount type, got %s", mounts[0].Type)
 	}
-	mnt := mounts[0]
-	var layer string
-	var topLower string
+	var (
+		mnt        = mounts[0]
+		layers     = []string{}
+		upperLayer = ""
+	)
+
 	for _, o := range mnt.Options {
 		if k, v, ok := strings.Cut(o, "="); ok {
 			switch k {
 			case "upperdir":
-				layer = filepath.Dir(v)
+				upperLayer = filepath.Dir(v)
 			case "lowerdir":
-				dir, _, _ := strings.Cut(v, ":")
-				topLower = filepath.Dir(dir)
+				// lowerdir can be a colon-separated list
+				for _, dir := range strings.Split(v, ":") {
+					layers = append(layers, filepath.Dir(dir))
+				}
 			}
 		}
 	}
-	if layer == "" {
-		if topLower == "" {
-			return "", fmt.Errorf("unsupported overlay layer for erofs differ: %w", errdefs.ErrNotImplemented)
-		}
-		layer = topLower
+	if upperLayer != "" {
+		layers = append(layers, upperLayer)
 	}
-	return layer, nil
+	if len(layers) == 0 {
+		return nil, fmt.Errorf("no layers found in overlay mount options")
+	}
+	slices.Reverse(layers)
+	return layers, nil
+}
+
+func DiffDirChanges(ctx context.Context, baseDir string, diffLayers []string, changeFns []fs.ChangeFunc) error {
+	mergeFileView, err := getMergeFileView(diffLayers)
+	if err != nil {
+		return fmt.Errorf("failed to get merge file view: %w", err)
+	}
+	return fastDiffDirChanges(baseDir, mergeFileView, diffLayers, changeFns)
+}
+
+// ChangeFunc is the type of function called for each change
+// computed during a directory changes calculation.
+type ChangeFunc func(fs.ChangeKind, string, os.FileInfo, error) error
+
+type diffDirOptions struct {
+	skipChange   func(string, os.FileInfo) (bool, error)
+	deleteChange func(string, string, os.FileInfo, fs.ChangeFunc) (bool, error)
+}
+
+// Gnu tar and the go tar writer don't have sub-second mtime
+// precision, which is problematic when we apply changes via tar
+// files, we handle this by comparing for exact times, *or* same
+// second count and either a or b having exactly 0 nanoseconds
+func sameFsTime(a, b time.Time) bool {
+	return a.Equal(b) ||
+		(a.Unix() == b.Unix() &&
+			(a.Nanosecond() == 0 || b.Nanosecond() == 0))
+}
+
+func fastDiffDirChanges(baseDir string, mergeFileView *fsstructs.MergedFileView, diffLayers []string, changeFns []fs.ChangeFunc) error {
+	var o *diffDirOptions
+
+	changedDirs := make(map[string]struct{})
+	return mergeFileView.Files.Walk(func(key, fullPath string, value any) error {
+		node, ok := value.(fsstructs.FileNode)
+		if !ok {
+			return nil
+		}
+		layerIndex := node.LayerIndex
+		diffDir := diffLayers[layerIndex]
+		f, err := os.Lstat(fullPath)
+		if err != nil {
+			return err
+		}
+		// Rebase path
+		path, err := filepath.Rel(diffDir, fullPath)
+		if err != nil {
+			return err
+		}
+
+		path = filepath.Join(string(os.PathSeparator), path)
+
+		// Skip root
+		if path == string(os.PathSeparator) {
+			return nil
+		}
+
+		if o.skipChange != nil {
+			if skip, err := o.skipChange(path, f); skip {
+				return err
+			}
+		}
+
+		var kind fs.ChangeKind
+
+		deletedFile := false
+		changeFn := changeFns[layerIndex]
+
+		if o.deleteChange != nil {
+			deletedFile, err = o.deleteChange(diffDir, path, f, changeFn)
+			if err != nil {
+				return err
+			}
+
+			_, err = os.Stat(filepath.Join(baseDir, path))
+			if err != nil {
+				if !os.IsNotExist(err) {
+					return err
+				}
+				deletedFile = false
+			}
+		}
+
+		// Find out what kind of modification happened
+		if deletedFile {
+			kind = fs.ChangeKindDelete
+		} else {
+			// Otherwise, the file was added
+			kind = fs.ChangeKindAdd
+
+			// ...Unless it already existed in a baseDir, in which case, it's a modification
+			stat, err := os.Stat(filepath.Join(baseDir, path))
+			if err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			if err == nil {
+				// The file existed in the baseDir, so that's a modification
+
+				// However, if it's a directory, maybe it wasn't actually modified.
+				// If you modify /foo/bar/baz, then /foo will be part of the changed files only because it's the parent of bar
+				if stat.IsDir() && f.IsDir() {
+					if f.Size() == stat.Size() && f.Mode() == stat.Mode() && sameFsTime(f.ModTime(), stat.ModTime()) {
+						// Both directories are the same, don't record the change
+						return nil
+					}
+				}
+				kind = fs.ChangeKindModify
+			}
+		}
+
+		// If /foo/bar/file.txt is modified, then /foo/bar must be part of the changed files.
+		// This block is here to ensure the change is recorded even if the
+		// modify time, mode and size of the parent directory in the rw and ro layers are all equal.
+		// Check https://github.com/docker/docker/pull/13590 for details.
+		if f.IsDir() {
+			changedDirs[path] = struct{}{}
+		}
+
+		if kind == fs.ChangeKindAdd || kind == fs.ChangeKindDelete {
+			parent := filepath.Dir(path)
+
+			if _, ok := changedDirs[parent]; !ok && parent != "/" {
+				pi, err := os.Stat(filepath.Join(diffDir, parent))
+				if err := changeFn(fs.ChangeKindModify, parent, pi, err); err != nil {
+					return err
+				}
+				changedDirs[parent] = struct{}{}
+			}
+		}
+
+		if kind == fs.ChangeKindDelete {
+			f = nil
+		}
+		return changeFn(kind, path, f, nil)
+	})
+}
+
+func getMergeFileView(diffLayers []string) (*fsstructs.MergedFileView, error) {
+	view := fsstructs.NewMergedFileView()
+	for layerIndex := len(diffLayers) - 1; layerIndex >= 0; layerIndex-- {
+		layerDir := diffLayers[layerIndex]
+		// Walk all files in layerDir using WalkDir
+		err := filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			// Call MergeFileIfNecessary for each file
+			if ifMerged, mergeErr := view.MergeFileIfNecessary(path, layerIndex); mergeErr != nil {
+				return mergeErr
+			} else {
+				log.L.Debugf("Merging file: %s, layerIndex: %d, merged: %v, err: %v", path, layerIndex, ifMerged, mergeErr)
+			}
+			return nil
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error walking layer %s: %w", layerDir, err)
+		}
+	}
+	return view, nil
+}
+
+func tryGeneratingDiffLayers(overlayfs1, overlayfs2 []mount.Mount) ([]string, error) {
+	var (
+		diffLayers []string = []string{}
+	)
+	layers1, err := overlayMountsToLayers(overlayfs1)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get layers from overlayfs1: %w", err)
+	}
+	layers2, err := overlayMountsToLayers(overlayfs2)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get layers from overlayfs2: %w", err)
+	}
+	if len(layers1) > len(layers2) {
+		// overlayfs2 is not based on overlayfs1
+		return nil, nil
+	}
+	for i, l := range layers1 {
+		if l != layers2[i] {
+			// overlayfs2 is not based on overlayfs1
+			return nil, nil
+		}
+	}
+	// overlayfs2 is based on overlayfs1
+	if len(layers2) > len(layers1) {
+		diffLayers = layers2[len(layers1):]
+	}
+	return diffLayers, nil
 }
