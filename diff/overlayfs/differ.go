@@ -67,6 +67,10 @@ func NewOverlayfsDiff(store content.Store) diff.Comparer {
 // Compare creates a diff between the given mounts and uploads the result
 // to the content store.
 func (s *overlayfsDiff) Compare(ctx context.Context, lower, upper []mount.Mount, opts ...diff.Opt) (d ocispec.Descriptor, err error) {
+	// Try to generate diff layers based on overlayfs mount options
+	// If successful, we can generate the diff more efficiently
+	// by only looking at the diff layers instead of doing a full
+	// directory walk.
 	diffLayers, err := tryGeneratingDiffLayers(lower, upper)
 	if err != nil {
 		return emptyDesc, fmt.Errorf("failed to generate diff layers: %w", err)
@@ -304,7 +308,7 @@ func tryGeneratingDiffLayers(child, ancestor []mount.Mount) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to get layers from overlayfs2: %w", err)
 	}
-		// The child is not based on ancestor, or child is the same as ancestor
+	// The child is not based on ancestor, or child is the same as ancestor
 	if len(childLayers) < len(ancestorLayers) {
 		return nil, nil
 	}
@@ -316,9 +320,9 @@ func tryGeneratingDiffLayers(child, ancestor []mount.Mount) ([]string, error) {
 		}
 	}
 	if len(childLayers) > len(ancestorLayers) {
-	// The child is based on the ancestor
-	// Get the diff layers
-	diffLayers = childLayers[len(ancestorLayers):]
+		// The child is based on the ancestor
+		// Get the diff layers
+		diffLayers = childLayers[len(ancestorLayers):]
 	}
 	return diffLayers, nil
 }
