@@ -285,31 +285,40 @@ func overlayMountsToLayers(mounts []mount.Mount) ([]string, error) {
 	return layers, nil
 }
 
-func tryGeneratingDiffLayers(overlayfs1, overlayfs2 []mount.Mount) ([]string, error) {
+// tryGeneratingDiffLayers tries to determine the diff layers between two overlayfs mount sets.
+// If the child mount is based on the ancestor mount, it returns the diff layers.
+// If the child mount is not based on the ancestor mount, it returns nil.
+// If the child mount is the same as the ancestor mount, it returns an empty slice.
+// If there is an error, it returns an error.
+func tryGeneratingDiffLayers(child, ancestor []mount.Mount) ([]string, error) {
 	var (
-		diffLayers []string = []string{}
+		diffLayers = []string{}
 	)
-	layers1, err := overlayMountsToLayers(overlayfs1)
+	// Get the layers of the child from overlay mount options
+	childLayers, err := overlayMountsToLayers(child)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get layers from overlayfs1: %w", err)
 	}
-	layers2, err := overlayMountsToLayers(overlayfs2)
+	// Get the layers of the ancestor from overlay mount options
+	ancestorLayers, err := overlayMountsToLayers(ancestor)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get layers from overlayfs2: %w", err)
 	}
-	if len(layers1) > len(layers2) {
-		// overlayfs2 is not based on overlayfs1
+		// The child is not based on ancestor, or child is the same as ancestor
+	if len(childLayers) < len(ancestorLayers) {
 		return nil, nil
 	}
-	for i, l := range layers1 {
-		if l != layers2[i] {
-			// overlayfs2 is not based on overlayfs1
+	for i, l := range ancestorLayers {
+		if l != childLayers[i] {
+			// The ancestor is not based on the child
+			log.L.Debugf("child layer %s is not equal to ancestor layer %s", childLayers[i], l)
 			return nil, nil
 		}
 	}
-	// overlayfs2 is based on overlayfs1
-	if len(layers2) > len(layers1) {
-		diffLayers = layers2[len(layers1):]
+	if len(childLayers) > len(ancestorLayers) {
+	// The child is based on the ancestor
+	// Get the diff layers
+	diffLayers = childLayers[len(ancestorLayers):]
 	}
 	return diffLayers, nil
 }
