@@ -6,8 +6,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/containerd/containerd/log"
 	fs "github.com/containerd/continuity/fs"
+	"github.com/containerd/log"
 )
 
 // ChangeFunc is the type of function called for each change
