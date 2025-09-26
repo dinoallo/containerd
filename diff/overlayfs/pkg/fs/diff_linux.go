@@ -100,3 +100,43 @@ func getOpaqueValue(filePath string) ([]byte, error) {
 	}
 	return nil, unix.ENODATA
 }
+
+func isWhiteout(path string) (bool, error) {
+	f, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if f.Mode()&os.ModeCharDevice != 0 {
+		if _, ok := f.Sys().(*syscall.Stat_t); !ok {
+			return false, nil
+		}
+
+		maj, min, err := devices.DeviceInfo(f)
+		if err != nil {
+			return false, err
+		}
+		return (maj == 0 && min == 0), nil
+	}
+	return false, nil
+}
+
+func isOpaqueDir(path string) (bool, error) {
+	f, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if f.IsDir() {
+		opaque, err := getOpaqueValue(path)
+		if err != nil {
+			if errors.Is(err, unix.ENODATA) {
+				return false, nil
+			}
+			return false, err
+		}
+
+		if len(opaque) == 1 && opaque[0] == 'y' {
+			return true, nil
+		}
+	}
+	return false, nil
+}

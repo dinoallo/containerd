@@ -7,7 +7,6 @@ import (
 	"time"
 
 	fs "github.com/containerd/continuity/fs"
-	"github.com/containerd/log"
 )
 
 // ChangeFunc is the type of function called for each change
@@ -32,29 +31,23 @@ func DiffDirChanges(baseDir string, diffLayers []string, changeFns []ChangeFunc)
 	o := &diffDirOptions{
 		deleteChange: overlayFSWhiteoutConvert,
 	}
-	mergeFileView, err := getMergeFileView(diffLayers)
+	overlayfs, err := initOverlayfs(diffLayers)
 	if err != nil {
-		return fmt.Errorf("failed to get merge file view: %w", err)
+		return err
 	}
-
 	changedDirs := make(map[string]struct{})
-	return mergeFileView.Files.Walk(func(key, fullPath string, value any) error {
-		node, ok := value.(FileNode)
-		if !ok {
-			return nil
-		}
+	return overlayfs.Walk(func(node Node) error {
 		layerIndex := node.LayerIndex
-		diffDir := diffLayers[layerIndex]
-		f, err := os.Lstat(fullPath)
+		diffDir := overlayfs.GetLayer(layerIndex)
+		f, err := os.Lstat(node.FullPath)
 		if err != nil {
 			return err
 		}
 		// Rebase path
-		path, err := filepath.Rel(diffDir, fullPath)
+		path, err := filepath.Rel(diffDir, node.FullPath)
 		if err != nil {
 			return err
 		}
-
 		path = filepath.Join(string(os.PathSeparator), path)
 
 		// Skip root
@@ -136,26 +129,26 @@ func DiffDirChanges(baseDir string, diffLayers []string, changeFns []ChangeFunc)
 	})
 }
 
-func getMergeFileView(diffLayers []string) (*MergedFileView, error) {
-	view := NewMergedFileView()
-	for layerIndex := len(diffLayers) - 1; layerIndex >= 0; layerIndex-- {
-		layerDir := diffLayers[layerIndex]
-		// Walk all files in layerDir using WalkDir
-		err := filepath.WalkDir(layerDir, func(path string, d os.DirEntry, err error) error {
+func initOverlayfs(layers []string) (OverlayFS, error) {
+	overlayfs := NewOverlayFSTrie(layers)
+	for layerIndex := len(layers) - 1; layerIndex >= 0; layerIndex-- {
+		layer := layers[layerIndex]
+		err := filepath.Walk(layer, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
 			}
-			// Call MergeFileIfNecessary for each file
-			if ifMerged, mergeErr := view.MergeFileIfNecessary(path, layerIndex); mergeErr != nil {
-				return mergeErr
-			} else {
-				log.L.Debugf("Merging file: %s, layerIndex: %d, merged: %v, err: %v", path, layerIndex, ifMerged, mergeErr)
+			if path == layer {
+				return nil
 			}
-			return nil
+			_, err = overlayfs.Merge(FileMeta{
+				FullPath:   path,
+				LayerIndex: layerIndex,
+			})
+			return err
 		})
 		if err != nil {
-			return nil, fmt.Errorf("error walking layer %s: %w", layerDir, err)
+			return nil, fmt.Errorf("failed to init overlayfs from layer %q: %w", layer, err)
 		}
 	}
-	return view, nil
+	return overlayfs, nil
 }
