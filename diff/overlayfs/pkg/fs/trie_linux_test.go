@@ -80,6 +80,33 @@ func mountOverlay(t *testing.T, lower, upper, work, merged string) func() {
 	}
 }
 
+func TestParts(t *testing.T) {
+	cases := []struct {
+		path string
+		want []string
+	}{
+		{path: "/keep.txt", want: []string{"keep.txt"}},
+		{path: "/rm.txt", want: []string{"rm.txt"}},
+		{path: "/", want: []string{""}},
+		{path: "/dir1/file1.txt", want: []string{"dir1", "file1.txt"}},
+	}
+
+	for _, c := range cases {
+		t.Run(c.path, func(t *testing.T) {
+			got := Parts(c.path)
+			// fmt.Printf("Parts(%q) = %v\n", c.path, got)
+			if len(got) != len(c.want) {
+				t.Errorf("Parts(%q) = %v, want %v", c.path, got, c.want)
+				return
+			}
+			// Use DeepEqual for slice comparison
+			if !reflect.DeepEqual(got, c.want) {
+				t.Errorf("Parts(%q) = %v, want %v", c.path, got, c.want)
+			}
+		})
+	}
+}
+
 func TestOverlayFSTrieMergeMatchesOverlayMount(t *testing.T) {
 	requireRoot(t)
 
@@ -142,13 +169,14 @@ func TestOverlayFSTrieMergeMatchesOverlayMount(t *testing.T) {
 			if err != nil {
 				return err
 			}
+			fullPath := string(filepath.Separator) + rel // Make absolute path for trie
 			// Update trie state first
-			if _, mErr := trie.Merge(FileMeta{FullPath: rel, LayerIndex: idx}); mErr != nil {
+			if _, mErr := trie.Merge(FileMeta{FullPath: fullPath, LayerIndex: idx}); mErr != nil {
 				return mErr
 			}
 			// Determine if this path is a whiteout in this layer; if so, suppress from lowers
-			if w, wErr := isWhiteout(rel); wErr == nil && w {
-				suppressed[rel] = true
+			if w, wErr := isWhiteout(fullPath); wErr == nil && w {
+				suppressed[fullPath] = true
 				return nil
 			}
 			return nil
@@ -180,11 +208,12 @@ func TestOverlayFSTrieMergeMatchesOverlayMount(t *testing.T) {
 			if suppressed[rel] {
 				return nil
 			}
+			fullPath := string(filepath.Separator) + rel // Make absolute path for trie
 			// Skip if this is a whiteout in this layer
-			if w, wErr := isWhiteout(rel); wErr == nil && w {
+			if w, wErr := isWhiteout(fullPath); wErr == nil && w {
 				return nil
 			}
-			gotSet[rel] = struct{}{}
+			gotSet[fullPath] = struct{}{}
 			return nil
 		})
 		if err != nil {

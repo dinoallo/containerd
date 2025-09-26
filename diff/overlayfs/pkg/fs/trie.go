@@ -2,6 +2,7 @@ package fs
 
 import (
 	"path/filepath"
+	"slices"
 )
 
 // For now, we keep a simple trie implementation here.
@@ -10,21 +11,40 @@ import (
 type TrieKey string
 
 func Parts(fullPath string) []string {
-	parts := []string{}
-	for _, part := range filepath.SplitList(fullPath) {
-		if part != "" && part != string(filepath.Separator) {
-			parts = append(parts, part)
+	var parts []string
+	currentPath := fullPath
+
+	for {
+		dir, file := filepath.Split(currentPath)
+
+		if file != "" {
+			parts = append(parts, file)
 		}
+
+		if dir == "" || dir == currentPath { // Reached the root or no more directories
+			if dir != "" && dir != "/" && dir != "\\" { // Add root if it's not just a separator
+				parts = append(parts, dir)
+			}
+			break
+		}
+
+		currentPath = filepath.Clean(dir) // Clean the directory part for the next iteration
 	}
+	if len(parts) == 0 {
+		return []string{""} // Handle the case for root "/"
+	}
+
+	slices.Reverse(parts) // Reverse to get the parts in correct order (root to leaf)
 	return parts
 }
 
-func CheckRemoved(fileMeta FileMeta) (bool, error) {
-	whiteout, err := isWhiteout(fileMeta.FullPath)
+func CheckRemoved(rootDir string, fileMeta FileMeta) (bool, error) {
+	fullPath := filepath.Join(rootDir, fileMeta.FullPath)
+	whiteout, err := isWhiteout(fullPath)
 	if err != nil {
 		return false, err
 	}
-	opaque, err := isOpaqueDir(fileMeta.FullPath)
+	opaque, err := isOpaqueDir(fullPath)
 	if err != nil {
 		return false, err
 	}
@@ -73,7 +93,8 @@ func (t *OverlayFSTrie) Merge(fileMeta FileMeta) (ok bool, err error) {
 				LayerIndex: layerIndex,
 			},
 		}
-		if removed, err := CheckRemoved(fileMeta); err != nil {
+		rootDir := t.layers[layerIndex]
+		if removed, err := CheckRemoved(rootDir, fileMeta); err != nil {
 			//TODO: add log
 			return false, err
 		} else if removed {
