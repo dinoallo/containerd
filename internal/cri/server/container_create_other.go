@@ -31,6 +31,6 @@ func (c *criService) containerSpecOpts(config *runtime.ContainerConfig, imageCon
 }
 
 // snapshotterOpts returns snapshotter options for the rootfs snapshot
-func snapshotterOpts(config *runtime.ContainerConfig) ([]snapshots.Opt, error) {
+func snapshotterOpts(config *runtime.ContainerConfig, sandboxConfig *runtime.PodSandboxConfig) ([]snapshots.Opt, error) {
 	return []snapshots.Opt{}, nil
 }

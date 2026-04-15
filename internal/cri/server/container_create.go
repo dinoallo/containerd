@@ -344,7 +344,7 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	log.G(r.ctx).Debugf("Container %q spec: %#+v", r.containerID, spew.NewFormatter(spec))
 
 	// Grab any platform specific snapshotter opts.
-	sOpts, err := snapshotterOpts(r.containerConfig)
+	sOpts, err := snapshotterOpts(r.containerConfig, r.podSandboxConfig)
 	if err != nil {
 		return "", err
 	}

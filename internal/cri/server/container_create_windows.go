@@ -32,7 +32,7 @@ func (c *criService) containerSpecOpts(config *runtime.ContainerConfig, imageCon
 }
 
 // snapshotterOpts returns any Windows specific snapshotter options for the r/w layer
-func snapshotterOpts(config *runtime.ContainerConfig) ([]snapshots.Opt, error) {
+func snapshotterOpts(config *runtime.ContainerConfig, sandboxConfig *runtime.PodSandboxConfig) ([]snapshots.Opt, error) {
 	var opts []snapshots.Opt
 
 	// TODO: Only set for windows and cimfs snapshotter
