@@ -228,6 +228,23 @@ func DestroyVolume(ctx context.Context, vol *apis.LVMVolume) error {
 	return nil
 }
 
+// ForceDestroyVolume force removes an LVM volume.
+func ForceDestroyVolume(ctx context.Context, vol *apis.LVMVolume) error {
+	if vol == nil {
+		return fmt.Errorf("volume is nil")
+	}
+	lvPath := filepath.Join(DevPath, vol.Spec.VolGroup, vol.Name)
+	args := []string{"-f", "-y", lvPath}
+
+	klog.Infof("force destroying lvm volume %q with args %v", vol.Name, args)
+
+	output, _, err := RunCommandSplit(ctx, LVRemove, args...)
+	if err != nil {
+		return errors.Wrapf(NewExecError(output, err), "failed to force destroy lvm volume %q", vol.Name)
+	}
+	return nil
+}
+
 // ListLVMLogicalVolumeByVG lists logical volumes in a volume group.
 // If thinPoolName is non-empty, only volumes belonging to that pool are returned.
 func ListLVMLogicalVolumeByVG(ctx context.Context, vgName, thinPoolName string) ([]LogicalVolume, error) {
