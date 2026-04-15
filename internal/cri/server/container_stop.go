@@ -83,11 +83,13 @@ func (c *criService) StopContainer(ctx context.Context, r *runtime.StopContainer
 
 	snapshotter := c.RuntimeSnapshotter(ctx, ociRuntime)
 
+	log.G(ctx).Infof("Check snapshotter: %s", snapshotter)
+
 	// Check if the snapshotter is devbox and update the devbox snapshot.
 	if snapshotter == "devbox" {
 		err = c.client.UpdateDevboxSnapshot(ctx, snapshotter, i.ID, unmountLvm, "true")
 		if err != nil {
-			log.G(ctx).WithError(err).Error("failed to update devbox snapshot")
+			log.G(ctx).WithError(err).Errorf("Failed to update devbox snapshot: %s", err)
 		}
 	}
 

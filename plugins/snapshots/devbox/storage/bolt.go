@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/pkg/filters"
 	"github.com/containerd/errdefs"
+	"github.com/containerd/log"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -508,9 +509,12 @@ func SetDevboxContent(ctx context.Context, key, contentID, lvName, mountPath str
 // returns the mount path if one was recorded.
 func RemoveDevbox(ctx context.Context, key string) (string, error) {
 	var mountPath string
+
+	log.G(ctx).WithField("key", key).Warnf("[REMOVE-DEVBOX-TRACE] RemoveDevbox called with key")
 	err := withBucket(ctx, func(ctx context.Context, bkt, pbkt *bolt.Bucket) error {
 		sbkt := bkt.Bucket([]byte(key))
 		if sbkt == nil {
+			log.G(ctx).WithField("key", key).Warnf("[REMOVE-DEVBOX-TRACE] devbox snapshot bucket for key %s does not exist", key)
 			return errdefs.ErrNotFound
 		}
 		contentID := sbkt.Get(DevboxKeyContentID)
@@ -527,6 +531,13 @@ func RemoveDevbox(ctx context.Context, key string) (string, error) {
 			return nil
 		}
 		mountPath = string(cbkt.Get(DevboxKeyPath))
+
+		log.G(ctx).WithFields(log.Fields{
+			"key":             key,
+			"contentID":       string(contentID),
+			"mountPath":       mountPath,
+			"mountPath_empty": mountPath == "",
+		}).Warnf("[REMOVE-DEVBOX-TRACE] Retrieved fields from snapshot bucket")
 		return root.DeleteBucket(contentID)
 	})
 	if err != nil {
