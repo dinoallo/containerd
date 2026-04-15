@@ -170,7 +170,16 @@ func CreateVolume(ctx context.Context, vol *apis.LVMVolume) error {
 
 	output, _, err := RunCommandSplit(ctx, LVCreate, args...)
 	if err != nil {
-		return errors.Wrapf(NewExecError(output, err), "failed to create lvm volume %q", vol.Name)
+		wrappedErr := errors.Wrapf(NewExecError(output, err), "failed to create lvm volume %q", vol.Name)
+
+		volume := vol.Spec.VolGroup + "/" + vol.Name
+		if cleanupErr := DestroyVolume(ctx, vol); cleanupErr != nil {
+			klog.Warningf("lvm: failed to cleanup volume %s: %v", volume, cleanupErr)
+		} else {
+			klog.Infof("lvm: successfully cleaned up failed volume %s", volume)
+		}
+
+		return wrappedErr
 	}
 	return nil
 }
@@ -271,11 +280,18 @@ func ListLVMLogicalVolumeByVG(ctx context.Context, vgName, thinPoolName string) 
 		for _, item := range rep.LV {
 			lv, err := parseLogicalVolume(item)
 			if err != nil {
-				return nil, err
+				klog.Warningf("failed to parse LV %q, skipping: %v", item[LVName], err)
+				continue
 			}
 			if thinPoolName != "" && lv.PoolName != thinPoolName && lv.Name != thinPoolName {
 				continue
 			}
+			deviceName, err := getLvDeviceName(lv.Path)
+			if err != nil {
+				klog.Warningf("failed to get device name for LV %s, skipping: %v", lv.Name, err)
+				continue
+			}
+			lv.Device = deviceName
 			result = append(result, lv)
 		}
 	}
@@ -385,6 +401,24 @@ func parseFloat64Field(v string) (float64, error) {
 		return 0, nil
 	}
 	return strconv.ParseFloat(v, 64)
+}
+
+func getLvDeviceName(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		return "", fmt.Errorf("invalid device path: %s", path)
+	}
+
+	dmPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		klog.Errorf("failed to resolve device mapper from lv path %v: %v", path, err)
+		return "", err
+	}
+
+	_, file := filepath.Split(dmPath)
+	if file == "" {
+		return "", fmt.Errorf("invalid device path: %s", dmPath)
+	}
+	return file, nil
 }
 
 // RunCommandSplit is a wrapper function to run a command with timeout and
