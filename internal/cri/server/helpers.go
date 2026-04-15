@@ -78,6 +78,9 @@ const (
 	etcHostname = "/etc/hostname"
 	// resolvConfPath is the abs path of resolv.conf on host or container.
 	resolvConfPath = "/etc/resolv.conf"
+
+	// DevboxSnapshotter is the name of the devbox snapshotter.
+	DevboxSnapshotter = "devbox"
 )
 
 // getSandboxRootDir returns the root directory for managing sandbox files,

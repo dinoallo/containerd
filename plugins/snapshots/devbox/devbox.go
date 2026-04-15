@@ -379,7 +379,7 @@ func (o *Snapshotter) Remove(ctx context.Context, key string) (err error) {
 				o.RemoveDir(ctx, dir)
 			}
 			for _, lvName := range removedLvNames {
-				err := o.removeLv(lvName)
+				err := o.removeLv(ctx, lvName)
 				if err != nil {
 					log.G(ctx).WithError(err).WithField("lvName", lvName).Warn("failed to destroy LVM logical volume")
 					continue
@@ -451,7 +451,7 @@ func (o *Snapshotter) Cleanup(ctx context.Context) error {
 	}
 
 	for _, lvName := range cleanupLv {
-		err := o.removeLv(lvName)
+		err := o.removeLv(ctx, lvName)
 		if err != nil {
 			log.G(ctx).WithError(err).WithField("lvName", lvName).Warn("failed to destroy LVM logical volume")
 			continue
@@ -519,7 +519,7 @@ func (o *Snapshotter) getCleanupLvNames(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	lvs, err := lvm.ListLVMLogicalVolumeByVG(o.lvmVgName, o.ThinPoolName)
+	lvs, err := lvm.ListLVMLogicalVolumeByVG(ctx, o.lvmVgName, o.ThinPoolName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to list LVM logical volumes: %w", err)
 	}
@@ -537,7 +537,7 @@ func (o *Snapshotter) getCleanupLvNames(ctx context.Context) ([]string, error) {
 	return cleanup, nil
 }
 
-func (o *Snapshotter) resizeLVMVolume(lvName, useLimit string) error {
+func (o *Snapshotter) resizeLVMVolume(ctx context.Context, lvName, useLimit string) error {
 	capacity, err := parseUseLimit(useLimit)
 	if err != nil {
 		return fmt.Errorf("failed to parse use limit %s: %w", useLimit, err)
@@ -554,7 +554,7 @@ func (o *Snapshotter) resizeLVMVolume(lvName, useLimit string) error {
 		},
 	}
 
-	return lvm.ResizeLVMVolume(vol, true)
+	return lvm.ResizeLVMVolume(ctx, vol, true)
 }
 
 func isMountPoint(dir string) (bool, error) {
@@ -689,7 +689,7 @@ func (o *Snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 				} else if isMounted {
 					log.G(ctx).Infof("Path %s is already mounted, skipping mount", npath)
 				} else {
-					if err = o.resizeLVMVolume(lvName, useLimit); err != nil {
+					if err = o.resizeLVMVolume(ctx, lvName, useLimit); err != nil {
 						return fmt.Errorf("failed to resize LVM logical volume %s: %w", lvName, err)
 					}
 
@@ -847,7 +847,7 @@ func parseUseLimit(useLimit string) (string, error) {
 	return strconv.Itoa(capacity), nil
 }
 
-func (o *Snapshotter) removeLv(lvName string) error {
+func (o *Snapshotter) removeLv(ctx context.Context, lvName string) error {
 	vol := &apis.LVMVolume{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: lvName,
@@ -856,7 +856,7 @@ func (o *Snapshotter) removeLv(lvName string) error {
 			VolGroup: o.lvmVgName,
 		},
 	}
-	return lvm.DestroyVolume(vol)
+	return lvm.DestroyVolume(ctx, vol)
 }
 
 func (o *Snapshotter) prepareLvmDirectory(ctx context.Context, snapshotDir string, contentKey string, useLimit string) (string, string, error) {
@@ -882,21 +882,21 @@ func (o *Snapshotter) prepareLvmDirectory(ctx context.Context, snapshotDir strin
 			ThinProvision: o.ThinPoolName,
 		},
 	}
-	err = lvm.CreateVolume(vol)
+	err = lvm.CreateVolume(ctx, vol)
 	if err != nil {
 		return td, lvName, fmt.Errorf("failed to create LVM logical volume %s: %w", lvName, err)
 	}
 
 	err = o.mkfs(lvName)
 	if err != nil {
-		if err1 := o.removeLv(lvName); err1 != nil {
+		if err1 := o.removeLv(ctx, lvName); err1 != nil {
 			log.G(ctx).WithError(err1).WithField("lvName", lvName).Warn("failed to destroy LVM logical volume after mkfs failure")
 		}
 		return td, lvName, fmt.Errorf("failed to create filesystem on LVM logical volume %s: %w", lvName, err)
 	}
 	err = o.mountLvm(ctx, lvName, td)
 	if err != nil {
-		if err1 := o.removeLv(lvName); err1 != nil {
+		if err1 := o.removeLv(ctx, lvName); err1 != nil {
 			log.G(ctx).WithError(err1).WithField("lvName", lvName).Warn("failed to destroy LVM logical volume after mount failure")
 		}
 		return td, lvName, fmt.Errorf("failed to mount LVM logical volume %s: %w", lvName, err)

@@ -176,14 +176,6 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	)
 	labels := c.getLabels(ctx, ref)
 
-	// if snapshotter is devbox, add the pinned image label
-	if snapshotter == "devbox" {
-		if labels == nil {
-			labels = map[string]string{}
-		}
-		labels[crilabels.PinnedImageLabelKey] = crilabels.PinnedImageLabelValue
-	}
-
 	// If UseLocalImagePull is true, use client.Pull to pull the image, else use transfer service by default.
 	//
 	// Transfer service does not currently support all the CRI image config options.
@@ -212,7 +204,19 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 		if r == "" {
 			continue
 		}
-		if err := c.createOrUpdateImageReference(ctx, r, image.Target(), labels); err != nil {
+
+		var imageLabels map[string]string
+		if r == repoTag && snapshotter == "devbox" {
+			imageLabels = make(map[string]string)
+			for k, v := range labels {
+				imageLabels[k] = v
+			}
+			imageLabels[crilabels.PinnedImageLabelKey] = crilabels.PinnedImageLabelValue
+		} else {
+			imageLabels = labels
+		}
+
+		if err := c.createOrUpdateImageReference(ctx, r, image.Target(), imageLabels); err != nil {
 			return "", fmt.Errorf("failed to create image reference %q: %w", r, err)
 		}
 		// Update image store to reflect the newest state in containerd.

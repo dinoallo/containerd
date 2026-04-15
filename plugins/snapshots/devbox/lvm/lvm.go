@@ -20,12 +20,14 @@ package lvm
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	apis "github.com/openebs/lvm-localpv/pkg/apis/openebs.io/lvm/v1alpha1"
 	"github.com/pkg/errors"
@@ -136,7 +138,7 @@ func NewExecError(output []byte, err error) error {
 }
 
 // buildLVMCreateArgs returns lvcreate arguments for the volume.
-func buildLVMCreateArgs(vol *apis.LVMVolume) []string {
+func buildLVMCreateArgs(ctx context.Context, vol *apis.LVMVolume) []string {
 	var args []string
 
 	volume := vol.Name
@@ -146,8 +148,8 @@ func buildLVMCreateArgs(vol *apis.LVMVolume) []string {
 	if len(vol.Spec.Capacity) != 0 {
 		if strings.TrimSpace(vol.Spec.ThinProvision) == "" {
 			args = append(args, "-L", size)
-		} else if !lvThinExists(vol.Spec.VolGroup, pool) {
-			args = append(args, "-L", getThinPoolSize(vol.Spec.VolGroup, vol.Spec.Capacity))
+		} else if !lvThinExists(ctx, vol.Spec.VolGroup, pool) {
+			args = append(args, "-L", getThinPoolSize(ctx, vol.Spec.VolGroup, vol.Spec.Capacity))
 		}
 	}
 
@@ -162,12 +164,11 @@ func buildLVMCreateArgs(vol *apis.LVMVolume) []string {
 }
 
 // CreateVolume creates an LVM volume.
-func CreateVolume(vol *apis.LVMVolume) error {
-	args := buildLVMCreateArgs(vol)
+func CreateVolume(ctx context.Context, vol *apis.LVMVolume) error {
+	args := buildLVMCreateArgs(ctx, vol)
 	klog.Infof("creating lvm volume %q with args %v", vol.Name, args)
 
-	cmd := exec.Command(LVCreate, args...)
-	output, err := cmd.CombinedOutput()
+	output, _, err := RunCommandSplit(ctx, LVCreate, args...)
 	if err != nil {
 		return errors.Wrapf(NewExecError(output, err), "failed to create lvm volume %q", vol.Name)
 	}
@@ -175,7 +176,7 @@ func CreateVolume(vol *apis.LVMVolume) error {
 }
 
 // ResizeLVMVolume resizes an LVM volume.
-func ResizeLVMVolume(vol *apis.LVMVolume, resizeFS bool) error {
+func ResizeLVMVolume(ctx context.Context, vol *apis.LVMVolume, resizeFS bool) error {
 	if vol == nil {
 		return fmt.Errorf("volume is nil")
 	}
@@ -194,8 +195,7 @@ func ResizeLVMVolume(vol *apis.LVMVolume, resizeFS bool) error {
 
 	klog.Infof("resizing lvm volume %q with args %v", vol.Name, args)
 
-	cmd := exec.Command(LVExtend, args...)
-	output, err := cmd.CombinedOutput()
+	output, _, err := RunCommandSplit(ctx, LVExtend, args...)
 	if err != nil {
 		return errors.Wrapf(NewExecError(output, err), "failed to resize lvm volume %q", vol.Name)
 	}
@@ -203,7 +203,7 @@ func ResizeLVMVolume(vol *apis.LVMVolume, resizeFS bool) error {
 }
 
 // DestroyVolume removes an LVM volume.
-func DestroyVolume(vol *apis.LVMVolume) error {
+func DestroyVolume(ctx context.Context, vol *apis.LVMVolume) error {
 	if vol == nil {
 		return fmt.Errorf("volume is nil")
 	}
@@ -212,8 +212,7 @@ func DestroyVolume(vol *apis.LVMVolume) error {
 
 	klog.Infof("destroying lvm volume %q with args %v", vol.Name, args)
 
-	cmd := exec.Command(LVRemove, args...)
-	output, err := cmd.CombinedOutput()
+	output, _, err := RunCommandSplit(ctx, LVRemove, args...)
 	if err != nil {
 		return errors.Wrapf(NewExecError(output, err), "failed to destroy lvm volume %q", vol.Name)
 	}
@@ -222,7 +221,7 @@ func DestroyVolume(vol *apis.LVMVolume) error {
 
 // ListLVMLogicalVolumeByVG lists logical volumes in a volume group.
 // If thinPoolName is non-empty, only volumes belonging to that pool are returned.
-func ListLVMLogicalVolumeByVG(vgName, thinPoolName string) ([]LogicalVolume, error) {
+func ListLVMLogicalVolumeByVG(ctx context.Context, vgName, thinPoolName string) ([]LogicalVolume, error) {
 	args := []string{
 		"--reportformat", "json",
 		"--units", "b",
@@ -251,8 +250,7 @@ func ListLVMLogicalVolumeByVG(vgName, thinPoolName string) ([]LogicalVolume, err
 		vgName,
 	}
 
-	cmd := exec.Command(LVList, args...)
-	output, err := cmd.CombinedOutput()
+	output, _, err := RunCommandSplit(ctx, LVList, args...)
 	if err != nil {
 		return nil, errors.Wrap(NewExecError(output, err), "failed to list logical volumes")
 	}
@@ -285,11 +283,11 @@ func ListLVMLogicalVolumeByVG(vgName, thinPoolName string) ([]LogicalVolume, err
 	return result, nil
 }
 
-func lvThinExists(vgName, thinPoolName string) bool {
+func lvThinExists(ctx context.Context, vgName, thinPoolName string) bool {
 	if strings.TrimSpace(thinPoolName) == "" {
 		return false
 	}
-	lvs, err := ListLVMLogicalVolumeByVG(vgName, "")
+	lvs, err := ListLVMLogicalVolumeByVG(ctx, vgName, "")
 	if err != nil {
 		klog.Warningf("failed to list lvm logical volumes for vg %q: %v", vgName, err)
 		return false
@@ -302,7 +300,7 @@ func lvThinExists(vgName, thinPoolName string) bool {
 	return false
 }
 
-func getThinPoolSize(vgName, requested string) string {
+func getThinPoolSize(ctx context.Context, vgName, requested string) string {
 	reqBytes, err := strconv.ParseInt(requested, 10, 64)
 	if err != nil || reqBytes <= 0 {
 		return requested + "b"
@@ -389,17 +387,51 @@ func parseFloat64Field(v string) (float64, error) {
 	return strconv.ParseFloat(v, 64)
 }
 
-// RunCommand is a small helper kept for parity with the original helper set.
-func RunCommand(name string, args ...string) ([]byte, error) {
-	cmd := exec.Command(name, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		if stderr.Len() > 0 {
-			return out, NewExecError(stderr.Bytes(), err)
-		}
-		return out, err
+// RunCommandSplit is a wrapper function to run a command with timeout and
+// receive its STDERR and STDOUT streams separately.
+func RunCommandSplit(ctx context.Context, command string, args ...string) ([]byte, []byte, error) {
+	ctx, cancel := context.WithTimeout(ctx, CommandTimeout)
+	defer cancel()
+
+	var cmdStdout bytes.Buffer
+	var cmdStderr bytes.Buffer
+
+	cmd := exec.CommandContext(ctx, command, args...)
+	cmd.Stdout = &cmdStdout
+	cmd.Stderr = &cmdStderr
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setpgid: true,
 	}
-	return out, nil
+	cmd.Cancel = func() error {
+		klog.Warningf("lvm: command %s %v timed out, sending SIGTERM", command, args)
+		if cmd.Process != nil {
+			pgid := cmd.Process.Pid
+			return syscall.Kill(-pgid, syscall.SIGTERM)
+		}
+		return nil
+	}
+	cmd.WaitDelay = CommandGraceTimeout
+
+	err := cmd.Run()
+	output := cmdStdout.Bytes()
+	errorOutput := cmdStderr.Bytes()
+
+	if len(errorOutput) > 0 {
+		klog.Warningf("lvm: said into stderr: %s", errorOutput)
+	}
+
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		if cmd.Process != nil {
+			pgid := cmd.Process.Pid
+			_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+	}
+
+	return output, errorOutput, err
+}
+
+// RunCommand is a small helper kept for parity with the original helper set.
+func RunCommand(ctx context.Context, name string, args ...string) ([]byte, error) {
+	out, _, err := RunCommandSplit(ctx, name, args...)
+	return out, err
 }
