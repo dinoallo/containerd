@@ -57,6 +57,8 @@ require (
 	github.com/opencontainers/runtime-spec v1.3.0
 	github.com/opencontainers/runtime-tools v0.9.1-0.20251114084447-edf4cb3d2116
 	github.com/opencontainers/selinux v1.13.1
+	github.com/openebs/lvm-localpv v1.7.0
+	github.com/otiai10/copy v1.14.1
 	github.com/pelletier/go-toml/v2 v2.2.4
 	github.com/prometheus/client_golang v1.23.2
 	github.com/sirupsen/logrus v1.9.3
@@ -125,6 +127,7 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
+	github.com/otiai10/mint v1.6.3 // indirect
 	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect

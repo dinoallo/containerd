@@ -1,0 +1,405 @@
+//go:build linux
+
+/*
+Copyright 2017 The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package lvm
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+
+	apis "github.com/openebs/lvm-localpv/pkg/apis/openebs.io/lvm/v1alpha1"
+	"github.com/pkg/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/klog/v2"
+)
+
+// LVM-related constants.
+const (
+	DevPath       = "/dev/"
+	DevMapperPath = "/dev/mapper/"
+
+	// MinExtentRoundOffSize represents minimum size (256Mi) to round off the
+	// volume group size in case of thin pool provisioning.
+	MinExtentRoundOffSize = 268435456
+
+	// BlockCleanerCommand is the command used to clean filesystem signatures on a device.
+	BlockCleanerCommand = "wipefs"
+)
+
+// LVM command-related constants.
+const (
+	VGCreate = "vgcreate"
+	VGList   = "vgs"
+
+	LVCreate = "lvcreate"
+	LVRemove = "lvremove"
+	LVExtend = "lvextend"
+	LVList   = "lvs"
+
+	PVList = "pvs"
+	PVScan = "pvscan"
+
+	YES        = "yes"
+	LVThinPool = "thin-pool"
+)
+
+var (
+	Enums = map[string][]string{
+		"lv_permissions":       {"unknown", "writeable", "read-only", "read-only-override"},
+		"lv_when_full":         {"error", "queue"},
+		"raid_sync_action":     {"idle", "frozen", "resync", "recover", "check", "repair"},
+		"lv_health_status":     {"", "partial", "refresh needed", "mismatches exist"},
+		"vg_allocation_policy": {"normal", "contiguous", "cling", "anywhere", "inherited"},
+		"vg_permissions":       {"writeable", "read-only"},
+	}
+)
+
+// LogicalVolume specifies attributes of a given LV that exists on the node.
+type LogicalVolume struct {
+	Name                string
+	FullName            string
+	UUID                string
+	Size                int64
+	Path                string
+	DMPath              string
+	Device              string
+	VGName              string
+	SegType             string
+	Permission          int
+	BehaviourWhenFull   int
+	HealthStatus        int
+	RaidSyncAction      int
+	ActiveStatus        string
+	Host                string
+	PoolName            string
+	UsedSizePercent     float64
+	MetadataSize        int64
+	MetadataUsedPercent float64
+	SnapshotUsedPercent float64
+}
+
+// PhysicalVolume specifies attributes of a given PV that exists on the node.
+type PhysicalVolume struct {
+	Name         string
+	UUID         string
+	Size         resource.Quantity
+	DeviceSize   resource.Quantity
+	MetadataSize resource.Quantity
+	MetadataFree resource.Quantity
+	Free         resource.Quantity
+	Used         resource.Quantity
+	Allocatable  string
+	Missing      string
+	InUse        string
+	VGName       string
+}
+
+// ExecError holds process output along with the underlying execution error.
+type ExecError struct {
+	Output []byte
+	Err    error
+}
+
+// Error implements the error interface.
+func (e *ExecError) Error() string {
+	return fmt.Sprintf("%v - %v", string(e.Output), e.Err)
+}
+
+func NewExecError(output []byte, err error) error {
+	if err == nil {
+		return nil
+	}
+	return &ExecError{
+		Output: output,
+		Err:    err,
+	}
+}
+
+// buildLVMCreateArgs returns lvcreate arguments for the volume.
+func buildLVMCreateArgs(vol *apis.LVMVolume) []string {
+	var args []string
+
+	volume := vol.Name
+	size := vol.Spec.Capacity + "b"
+	pool := vol.Spec.ThinProvision
+
+	if len(vol.Spec.Capacity) != 0 {
+		if strings.TrimSpace(vol.Spec.ThinProvision) == "" {
+			args = append(args, "-L", size)
+		} else if !lvThinExists(vol.Spec.VolGroup, pool) {
+			args = append(args, "-L", getThinPoolSize(vol.Spec.VolGroup, vol.Spec.Capacity))
+		}
+	}
+
+	if strings.TrimSpace(vol.Spec.ThinProvision) != "" {
+		args = append(args, "-T", vol.Spec.VolGroup+"/"+pool, "-V", size)
+	}
+
+	args = append(args, "-n", volume)
+	args = append(args, vol.Spec.VolGroup)
+
+	return args
+}
+
+// CreateVolume creates an LVM volume.
+func CreateVolume(vol *apis.LVMVolume) error {
+	args := buildLVMCreateArgs(vol)
+	klog.Infof("creating lvm volume %q with args %v", vol.Name, args)
+
+	cmd := exec.Command(LVCreate, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(NewExecError(output, err), "failed to create lvm volume %q", vol.Name)
+	}
+	return nil
+}
+
+// ResizeLVMVolume resizes an LVM volume.
+func ResizeLVMVolume(vol *apis.LVMVolume, resizeFS bool) error {
+	if vol == nil {
+		return fmt.Errorf("volume is nil")
+	}
+	if vol.Spec.Capacity == "" {
+		return fmt.Errorf("volume capacity is empty")
+	}
+
+	targetSize := vol.Spec.Capacity + "b"
+	lvPath := filepath.Join(DevPath, vol.Spec.VolGroup, vol.Name)
+
+	args := []string{"-L", targetSize}
+	if resizeFS {
+		args = append(args, "-r")
+	}
+	args = append(args, lvPath)
+
+	klog.Infof("resizing lvm volume %q with args %v", vol.Name, args)
+
+	cmd := exec.Command(LVExtend, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(NewExecError(output, err), "failed to resize lvm volume %q", vol.Name)
+	}
+	return nil
+}
+
+// DestroyVolume removes an LVM volume.
+func DestroyVolume(vol *apis.LVMVolume) error {
+	if vol == nil {
+		return fmt.Errorf("volume is nil")
+	}
+	lvPath := filepath.Join(DevPath, vol.Spec.VolGroup, vol.Name)
+	args := []string{"-f", lvPath}
+
+	klog.Infof("destroying lvm volume %q with args %v", vol.Name, args)
+
+	cmd := exec.Command(LVRemove, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.Wrapf(NewExecError(output, err), "failed to destroy lvm volume %q", vol.Name)
+	}
+	return nil
+}
+
+// ListLVMLogicalVolumeByVG lists logical volumes in a volume group.
+// If thinPoolName is non-empty, only volumes belonging to that pool are returned.
+func ListLVMLogicalVolumeByVG(vgName, thinPoolName string) ([]LogicalVolume, error) {
+	args := []string{
+		"--reportformat", "json",
+		"--units", "b",
+		"--nosuffix",
+		"-o", strings.Join([]string{
+			LVName,
+			LVFullName,
+			LVUUID,
+			LVPath,
+			LVDmPath,
+			LVActive,
+			LVSize,
+			LVMetadataSize,
+			LVSegtype,
+			LVHost,
+			LVPool,
+			LVPermissions,
+			LVWhenFull,
+			LVHealthStatus,
+			RaidSyncAction,
+			LVDataPercent,
+			LVMetadataPercent,
+			LVSnapPercent,
+			VGName,
+		}, ","),
+		vgName,
+	}
+
+	cmd := exec.Command(LVList, args...)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, errors.Wrap(NewExecError(output, err), "failed to list logical volumes")
+	}
+
+	type lvReport struct {
+		Report []struct {
+			LV []map[string]string `json:"lv"`
+		} `json:"report"`
+	}
+
+	var report lvReport
+	if err := json.Unmarshal(output, &report); err != nil {
+		return nil, errors.Wrap(err, "failed to decode lvs json output")
+	}
+
+	var result []LogicalVolume
+	for _, rep := range report.Report {
+		for _, item := range rep.LV {
+			lv, err := parseLogicalVolume(item)
+			if err != nil {
+				return nil, err
+			}
+			if thinPoolName != "" && lv.PoolName != thinPoolName && lv.Name != thinPoolName {
+				continue
+			}
+			result = append(result, lv)
+		}
+	}
+
+	return result, nil
+}
+
+func lvThinExists(vgName, thinPoolName string) bool {
+	if strings.TrimSpace(thinPoolName) == "" {
+		return false
+	}
+	lvs, err := ListLVMLogicalVolumeByVG(vgName, "")
+	if err != nil {
+		klog.Warningf("failed to list lvm logical volumes for vg %q: %v", vgName, err)
+		return false
+	}
+	for _, lv := range lvs {
+		if lv.Name == thinPoolName && lv.SegType == LVThinPool {
+			return true
+		}
+	}
+	return false
+}
+
+func getThinPoolSize(vgName, requested string) string {
+	reqBytes, err := strconv.ParseInt(requested, 10, 64)
+	if err != nil || reqBytes <= 0 {
+		return requested + "b"
+	}
+
+	rounded := reqBytes
+	if rounded < MinExtentRoundOffSize {
+		rounded = MinExtentRoundOffSize
+	}
+	return strconv.FormatInt(rounded, 10) + "b"
+}
+
+func parseLogicalVolume(item map[string]string) (LogicalVolume, error) {
+	var lv LogicalVolume
+	var err error
+
+	lv.Name = item[LVName]
+	lv.FullName = item[LVFullName]
+	lv.UUID = item[LVUUID]
+	lv.Path = item[LVPath]
+	lv.DMPath = item[LVDmPath]
+	lv.ActiveStatus = item[LVActive]
+	lv.SegType = item[LVSegtype]
+	lv.Host = item[LVHost]
+	lv.PoolName = item[LVPool]
+	lv.VGName = item[VGName]
+
+	if lv.Path != "" {
+		lv.Device = lv.Path
+	} else if lv.DMPath != "" {
+		lv.Device = lv.DMPath
+	}
+
+	if lv.Size, err = parseInt64Field(item[LVSize]); err != nil {
+		return lv, errors.Wrap(err, "failed to parse lv size")
+	}
+	if lv.MetadataSize, err = parseInt64Field(item[LVMetadataSize]); err != nil {
+		return lv, errors.Wrap(err, "failed to parse lv metadata size")
+	}
+	if lv.UsedSizePercent, err = parseFloat64Field(item[LVDataPercent]); err != nil {
+		return lv, errors.Wrap(err, "failed to parse lv data percent")
+	}
+	if lv.MetadataUsedPercent, err = parseFloat64Field(item[LVMetadataPercent]); err != nil {
+		return lv, errors.Wrap(err, "failed to parse lv metadata percent")
+	}
+	if lv.SnapshotUsedPercent, err = parseFloat64Field(item[LVSnapPercent]); err != nil {
+		return lv, errors.Wrap(err, "failed to parse lv snapshot percent")
+	}
+
+	lv.Permission = enumIndex("lv_permissions", item[LVPermissions])
+	lv.BehaviourWhenFull = enumIndex("lv_when_full", item[LVWhenFull])
+	lv.HealthStatus = enumIndex("lv_health_status", item[LVHealthStatus])
+	lv.RaidSyncAction = enumIndex("raid_sync_action", item[RaidSyncAction])
+
+	return lv, nil
+}
+
+func enumIndex(name, value string) int {
+	values, ok := Enums[name]
+	if !ok {
+		return -1
+	}
+	for i, v := range values {
+		if v == value {
+			return i
+		}
+	}
+	return -1
+}
+
+func parseInt64Field(v string) (int64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	return strconv.ParseInt(v, 10, 64)
+}
+
+func parseFloat64Field(v string) (float64, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return 0, nil
+	}
+	return strconv.ParseFloat(v, 64)
+}
+
+// RunCommand is a small helper kept for parity with the original helper set.
+func RunCommand(name string, args ...string) ([]byte, error) {
+	cmd := exec.Command(name, args...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		if stderr.Len() > 0 {
+			return out, NewExecError(stderr.Bytes(), err)
+		}
+		return out, err
+	}
+	return out, nil
+}
