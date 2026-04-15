@@ -37,6 +37,7 @@ import (
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/internal/cri/annotations"
 	criconfig "github.com/containerd/containerd/v2/internal/cri/config"
 	cio "github.com/containerd/containerd/v2/internal/cri/io"
@@ -54,6 +55,16 @@ import (
 func init() {
 	typeurl.Register(&containerstore.Metadata{},
 		"github.com/containerd/cri/pkg/store/container", "Metadata")
+}
+
+func devboxSnapshotterOpts(config *runtime.PodSandboxConfig) (snapshots.Opt, error) {
+	labels := make(map[string]string)
+	if config != nil {
+		for k, v := range config.Annotations {
+			labels[k] = v
+		}
+	}
+	return snapshots.WithLabels(labels), nil
 }
 
 // CreateContainer creates a new container in the given PodSandbox.
@@ -347,6 +358,17 @@ func (c *criService) createContainer(r *createContainerRequest) (_ string, retEr
 	sOpts, err := snapshotterOpts(r.containerConfig, r.podSandboxConfig)
 	if err != nil {
 		return "", err
+	}
+
+	// Check if the snapshotter is devbox and add the devbox snapshotter opts.
+	if c.RuntimeSnapshotter(r.ctx, ociRuntime) == "devbox" {
+		devboxOpt, err := devboxSnapshotterOpts(r.podSandboxConfig)
+		if err != nil {
+			return "", err
+		}
+		if devboxOpt != nil {
+			sOpts = append(sOpts, devboxOpt)
+		}
 	}
 
 	// Set snapshotter before any other options.

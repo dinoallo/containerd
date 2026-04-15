@@ -76,6 +76,21 @@ func (c *criService) StopContainer(ctx context.Context, r *runtime.StopContainer
 
 	containerStopTimer.WithValues(i.Runtime.Name).UpdateSince(start)
 
+	ociRuntime, err := c.config.GetSandboxRuntime(sandbox.Config, sandbox.RuntimeHandler)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sandbox runtime: %w", err)
+	}
+
+	snapshotter := c.RuntimeSnapshotter(ctx, ociRuntime)
+
+	// Check if the snapshotter is devbox and update the devbox snapshot.
+	if snapshotter == "devbox" {
+		err = c.client.UpdateDevboxSnapshot(ctx, snapshotter, i.ID, unmountLvm, "true")
+		if err != nil {
+			log.G(ctx).WithError(err).Error("failed to update devbox snapshot")
+		}
+	}
+
 	return &runtime.StopContainerResponse{}, nil
 }
 

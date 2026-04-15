@@ -376,6 +376,17 @@ func (c *Client) NewContainer(ctx context.Context, id string, opts ...NewContain
 	return containerFromRecord(c, r), nil
 }
 
+func (c *Client) UpdateDevboxSnapshot(ctx context.Context, snapshotter string, id string, label string, value string) error {
+	_, err := c.SnapshotService(snapshotter).Update(ctx, snapshots.Info{
+		Name:   id,
+		Labels: map[string]string{label: value},
+	}, "labels."+label)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // LoadContainer loads an existing container from metadata
 func (c *Client) LoadContainer(ctx context.Context, id string) (Container, error) {
 	ctx, span := tracing.StartSpan(ctx, "client.LoadContainer")

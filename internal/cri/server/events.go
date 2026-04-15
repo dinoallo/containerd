@@ -44,6 +44,8 @@ const (
 	// Add a timeout for each event handling, events that timeout will be requeued and
 	// handled again in the future.
 	handleEventTimeout = 10 * time.Second
+
+	unmountLvm = "containerd.io/snapshot/devbox-unmount-lvm"
 )
 
 // startSandboxExitMonitor starts an exit monitor for a given sandbox.
@@ -244,6 +246,16 @@ func (c *criService) handleContainerExit(ctx context.Context, e *eventtypes.Task
 			status.Pid = 0
 			status.FinishedAt = protobuf.FromTimestamp(e.ExitedAt).UnixNano()
 			status.ExitCode = int32(e.ExitStatus)
+
+			container, err := c.client.ContainerService().Get(ctx, cntr.Container.ID())
+			if err != nil {
+				return status, err
+			}
+			if container.Snapshotter == "devbox" {
+				if err := c.client.UpdateDevboxSnapshot(ctx, container.Snapshotter, container.ID, unmountLvm, "true"); err != nil {
+					log.G(ctx).WithError(err).Errorf("failed to update devbox snapshot for container %s", cntr.Container.ID())
+				}
+			}
 		}
 
 		// Unknown state can only transit to EXITED state, so we need
