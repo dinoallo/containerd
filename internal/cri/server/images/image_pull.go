@@ -176,6 +176,14 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	)
 	labels := c.getLabels(ctx, ref)
 
+	// if snapshotter is devbox, add the pinned image label
+	if snapshotter == "devbox" {
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[crilabels.PinnedImageLabelKey] = crilabels.PinnedImageLabelValue
+	}
+
 	// If UseLocalImagePull is true, use client.Pull to pull the image, else use transfer service by default.
 	//
 	// Transfer service does not currently support all the CRI image config options.
